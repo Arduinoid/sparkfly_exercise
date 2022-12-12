@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 /*
@@ -36,6 +38,7 @@ func main() {
 	}
 	defer dir.Close()
 	files, err := dir.ReadDir(-1)
+	start := time.Now()
 	for _, f := range files {
 		file, err := os.Open(dir.Name() + "/" + f.Name())
 		defer file.Close()
@@ -48,6 +51,8 @@ func main() {
 		go readFile(ctx, cf, file, wg, codesFound)
 	}
 	wg.Wait()
+	total := time.Now().Sub(start)
+	fmt.Printf("total run time: %s\n", total.String())
 }
 
 func readFile(ctx context.Context, cf context.CancelFunc, f *os.File, wg *sync.WaitGroup, store *sync.Map) {
@@ -62,7 +67,7 @@ func readFile(ctx context.Context, cf context.CancelFunc, f *os.File, wg *sync.W
 	var readerErr error
 	var firstLineSkipped bool
 
-	for readerErr != io.EOF {
+	for !errors.Is(readerErr, io.EOF) {
 		select {
 		case <-ctx.Done():
 			log.Println("aborting context finished")
@@ -74,7 +79,7 @@ func readFile(ctx context.Context, cf context.CancelFunc, f *os.File, wg *sync.W
 				continue
 			}
 			line, err := reader.Read()
-			if err != nil && err != io.EOF {
+			if err != nil {
 				log.Printf("aborting file: %s, could not read line: %s", f.Name(), err.Error())
 				cf()
 				return
