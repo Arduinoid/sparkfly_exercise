@@ -1,13 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 /*
@@ -27,8 +28,6 @@ func main() {
 	*/
 	fmt.Println("ingestor for Sparkfly")
 	// setup concurrency dependencies
-	ctx, cf := context.WithCancel(context.Background()) // used to drive short circuit behavior
-	wg := new(sync.WaitGroup)
 	codesFound := new(sync.Map)
 	dir, err := os.Open("./testdata")
 	if err != nil {
@@ -36,6 +35,7 @@ func main() {
 	}
 	defer dir.Close()
 	files, err := dir.ReadDir(-1)
+	start := time.Now() // capture time to check for performance
 	for _, f := range files {
 		file, err := os.Open(dir.Name() + "/" + f.Name())
 		defer file.Close()
@@ -43,52 +43,51 @@ func main() {
 			log.Printf("failed to open file: %s err: %s", f.Name(), err.Error())
 			continue
 		}
-		fmt.Printf("launch go routine for file: %s\n", file.Name())
-		wg.Add(1)
-		go readFile(ctx, cf, file, wg, codesFound)
+		err = readFile(file, codesFound)
+		if err != nil && !errors.Is(err, io.EOF) {
+			log.Printf("read file error: %s", err.Error())
+			break
+		}
 	}
-	wg.Wait()
+	total := time.Now().Sub(start) // evaluate total run time
+	fmt.Printf("total time to run: %s", total.String())
 }
 
-func readFile(ctx context.Context, cf context.CancelFunc, f *os.File, wg *sync.WaitGroup, store *sync.Map) {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Printf("go routine paniced, file: %s error: %s", f.Name(), err)
-		}
-	}()
-	defer wg.Done()
+func readFile(f *os.File, store *sync.Map) error {
 	reader := csv.NewReader(f)
-	reader.ReuseRecord = true
-	var readerErr error
-	var firstLineSkipped bool
+	var (
+		readerErr        error
+		firstLineSkipped bool
+		line             []string
+		recordCount      int
+	)
+	//reader.ReuseRecord = true
 
-	for readerErr != io.EOF {
-		select {
-		case <-ctx.Done():
-			log.Println("aborting context finished")
-			return
-		default:
-			if !firstLineSkipped {
-				reader.Read()
-				firstLineSkipped = true
-				continue
-			}
-			line, err := reader.Read()
-			if err != nil && err != io.EOF {
-				log.Printf("aborting file: %s, could not read line: %s", f.Name(), err.Error())
-				cf()
-				return
-			}
-			if len(line) == 0 {
-				log.Printf("record contains no data at offset: %d", reader.InputOffset())
-				return
-			}
-			if _, ok := store.Load(line[1]); ok {
-				log.Printf("aborting, duplicate found: %s", line[1])
-				cf()
-				return
-			}
-			store.Store(line[1], struct{}{})
+	for !errors.Is(readerErr, io.EOF) {
+		if !firstLineSkipped {
+			reader.Read()
+			firstLineSkipped = true
+			continue
 		}
+		line, readerErr = reader.Read()
+		if readerErr != nil {
+			if errors.Is(readerErr, io.EOF) {
+				return readerErr
+			} else {
+				log.Printf("aborting file: %s, records processed: %d, error: %s", f.Name(), recordCount, readerErr.Error())
+				return errors.New("reader error")
+			}
+		}
+		recordCount++
+		if len(line) == 0 {
+			log.Printf("file: %s, no record data at offset: %d, at record: %d", f.Name(), reader.InputOffset(), recordCount)
+			return errors.New("no data")
+		}
+		if _, ok := store.Load(line[1]); ok {
+			log.Printf("aborting, duplicate found: %s", line[1])
+			return errors.New("duplicate found")
+		}
+		store.Store(line[1], struct{}{})
 	}
+	return nil
 }
